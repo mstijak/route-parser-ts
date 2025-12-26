@@ -143,6 +143,144 @@ describe('Route', () => {
     });
   });
 
+  describe('query parameters', () => {
+    it('should match a path with query string when route has no query params', () => {
+      const route = Route('/foo');
+      assert.deepStrictEqual(route.match('/foo?a=1&b=2'), {});
+    });
+
+    it('should match a path without query string when route has no query params', () => {
+      const route = Route('/foo');
+      assert.deepStrictEqual(route.match('/foo'), {});
+    });
+
+    it('should match query parameters in same order', () => {
+      const route = Route('/?a=:a&b=:b');
+      assert.deepStrictEqual(route.match('/?a=1&b=2'), { a: '1', b: '2' });
+    });
+
+    it('should match query parameters in different order (issue #17)', () => {
+      const route = Route('/?a=:a&b=:b');
+      // This test documents the expected behavior - query order should not matter
+      assert.deepStrictEqual(route.match('/?b=2&a=1'), { a: '1', b: '2' });
+    });
+
+    it('should match path with parameters and query string', () => {
+      const route = Route('/users/:id');
+      assert.deepStrictEqual(route.match('/users/123?tab=profile'), { id: '123' });
+    });
+
+    it('should match path with parameters and multiple query params', () => {
+      const route = Route('/users/:id');
+      assert.deepStrictEqual(route.match('/users/123?tab=profile&view=grid'), { id: '123' });
+    });
+  });
+
+  describe('optional query parameters', () => {
+    it('should match route with optional query part - without query', () => {
+      const route = Route('/search(?q=:query)');
+      assert.deepStrictEqual(route.match('/search'), { query: undefined });
+    });
+
+    it('should match route with optional query part - with query', () => {
+      const route = Route('/search(?q=:query)');
+      assert.deepStrictEqual(route.match('/search?q=test'), { query: 'test' });
+    });
+
+    it('should match route with optional query params - without any query', () => {
+      const route = Route('/api/items(?page=:page(&limit=:limit))');
+      assert.deepStrictEqual(route.match('/api/items'), { page: undefined, limit: undefined });
+    });
+
+    it('should match route with optional query params - with first param only', () => {
+      const route = Route('/api/items(?page=:page(&limit=:limit))');
+      assert.deepStrictEqual(route.match('/api/items?page=1'), { page: '1', limit: undefined });
+    });
+
+    it('should match route with optional query params - with all params', () => {
+      const route = Route('/api/items(?page=:page(&limit=:limit))');
+      assert.deepStrictEqual(route.match('/api/items?page=1&limit=10'), { page: '1', limit: '10' });
+    });
+
+    it('should reverse route with optional query part - without params', () => {
+      const route = Route('/search(?q=:query)');
+      assert.strictEqual(route.reverse({}), '/search');
+    });
+
+    it('should reverse route with optional query part - with params', () => {
+      const route = Route('/search(?q=:query)');
+      assert.strictEqual(route.reverse({ query: 'test' }), '/search?q=test');
+    });
+
+    it('should reverse route with nested optional query params - partial', () => {
+      const route = Route('/api/items(?page=:page(&limit=:limit))');
+      assert.strictEqual(route.reverse({ page: '1' }), '/api/items?page=1');
+    });
+
+    it('should reverse route with nested optional query params - all', () => {
+      const route = Route('/api/items(?page=:page(&limit=:limit))');
+      assert.strictEqual(route.reverse({ page: '1', limit: '10' }), '/api/items?page=1&limit=10');
+    });
+
+    describe('independently optional query parameters', () => {
+      // Pattern: /search(?param1=:param1)(&param2=:param2)
+      // The ? and & should be intelligently handled during matching
+
+      it('should match with no query params', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        assert.deepStrictEqual(route.match('/search'), { param1: undefined, param2: undefined });
+      });
+
+      it('should match with first param only', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        assert.deepStrictEqual(route.match('/search?param1=foo'), { param1: 'foo', param2: undefined });
+      });
+
+      it('should match with second param only', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        // When only second param present, ? should be used instead of &
+        assert.deepStrictEqual(route.match('/search?param2=bar'), { param1: undefined, param2: 'bar' });
+      });
+
+      it('should match with both params', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        assert.deepStrictEqual(route.match('/search?param1=foo&param2=bar'), { param1: 'foo', param2: 'bar' });
+      });
+
+      it('should match with both params in different order', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        assert.deepStrictEqual(route.match('/search?param2=bar&param1=foo'), { param1: 'foo', param2: 'bar' });
+      });
+
+      it('should reverse with no params', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        assert.strictEqual(route.reverse({}), '/search');
+      });
+
+      it('should reverse with first param only', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        assert.strictEqual(route.reverse({ param1: 'foo' }), '/search?param1=foo');
+      });
+
+      it('should reverse with both params', () => {
+        const route = Route('/search(?param1=:param1)(&param2=:param2)');
+        assert.strictEqual(route.reverse({ param1: 'foo', param2: 'bar' }), '/search?param1=foo&param2=bar');
+      });
+
+      // Route defined with params in reverse order - ? and & should not affect matching
+      it('should match when route defines params in reverse order', () => {
+        const route = Route('/search(?param2=:param2)(&param1=:param1)');
+        // URL has param1 first, route has param2 first - should still match
+        assert.deepStrictEqual(route.match('/search?param1=foo&param2=bar'), { param1: 'foo', param2: 'bar' });
+      });
+
+      it('should match when route and URL have same reverse order', () => {
+        const route = Route('/search(?param2=:param2)(&param1=:param1)');
+        assert.deepStrictEqual(route.match('/search?param2=bar&param1=foo'), { param1: 'foo', param2: 'bar' });
+      });
+    });
+  });
+
   describe('reverse', () => {
     it('reverses routes without params', () => {
       const route = Route('/foo');
