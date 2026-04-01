@@ -174,6 +174,31 @@ describe('Route', () => {
       const route = Route('/users/:id');
       assert.deepStrictEqual(route.match('/users/123?tab=profile&view=grid'), { id: '123' });
     });
+
+    it('should not match when required query param is missing', () => {
+      const route = Route('/foo?a=:a');
+      assert.strictEqual(route.match('/foo'), false);
+    });
+
+    it('should not match when one of multiple required query params is missing', () => {
+      const route = Route('/?a=:a&b=:b');
+      assert.strictEqual(route.match('/?a=1'), false);
+    });
+
+    it('should match when query has a fixed value', () => {
+      const route = Route('/foo?type=bar');
+      assert.deepStrictEqual(route.match('/foo?type=bar'), {});
+    });
+
+    it('should not match when query has a different fixed value', () => {
+      const route = Route('/foo?type=bar');
+      assert.strictEqual(route.match('/foo?type=baz'), false);
+    });
+
+    it('should not match when query with fixed value is missing', () => {
+      const route = Route('/foo?type=bar');
+      assert.strictEqual(route.match('/foo'), false);
+    });
   });
 
   describe('optional query parameters', () => {

@@ -24,6 +24,13 @@ interface QueryParamDef {
   optional: boolean;  // Whether this param is inside optional segment
 }
 
+// Fixed query key-value pair extracted from route spec (e.g., 'type=bar')
+interface QueryFixedDef {
+  key: string;
+  value: string;
+  optional: boolean;
+}
+
 /**
  * Parse a route specification into tokens
  */
@@ -104,10 +111,11 @@ function hasQueryTokens(tokens: Token[]): boolean {
 }
 
 /**
- * Extract query parameter definitions from tokens
+ * Extract query parameter and fixed value definitions from tokens
  */
-function extractQueryParams(tokens: Token[], optional: boolean = false): QueryParamDef[] {
+function extractQueryDefs(tokens: Token[], optional: boolean = false): { params: QueryParamDef[]; fixed: QueryFixedDef[] } {
   const params: QueryParamDef[] = [];
+  const fixed: QueryFixedDef[] = [];
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -126,13 +134,28 @@ function extractQueryParams(tokens: Token[], optional: boolean = false): QueryPa
         }
       }
       params.push({ name: token.value, key, optional });
+    } else if (token.type === 'static') {
+      // Extract fixed key=value pairs (e.g., 'type=bar')
+      const pairs = token.value.split('&').map(s => s.replace(/^[?&]/, ''));
+      for (const pair of pairs) {
+        const eqIdx = pair.indexOf('=');
+        if (eqIdx > 0) {
+          const key = pair.slice(0, eqIdx);
+          const value = pair.slice(eqIdx + 1);
+          if (value) {
+            fixed.push({ key, value, optional });
+          }
+        }
+      }
     } else if (token.type === 'optional' && token.children) {
       // Recursively extract from optional segments
-      params.push(...extractQueryParams(token.children, true));
+      const childDefs = extractQueryDefs(token.children, true);
+      params.push(...childDefs.params);
+      fixed.push(...childDefs.fixed);
     }
   }
 
-  return params;
+  return { params, fixed };
 }
 
 /**
@@ -314,6 +337,7 @@ class RouteParser {
   private pathRegex: RegExp;
   private pathParamNames: string[];
   private queryParamDefs: QueryParamDef[];
+  private queryFixedDefs: QueryFixedDef[];
   private hasQueryInSpec: boolean;
 
   constructor(spec: string) {
@@ -332,8 +356,10 @@ class RouteParser {
     this.pathRegex = new RegExp(`^${pattern}(?:\\?.*)?$`);
     this.pathParamNames = paramNames;
 
-    // Extract query parameter definitions
-    this.queryParamDefs = extractQueryParams(queryTokens);
+    // Extract query parameter and fixed value definitions
+    const queryDefs = extractQueryDefs(queryTokens);
+    this.queryParamDefs = queryDefs.params;
+    this.queryFixedDefs = queryDefs.fixed;
     this.hasQueryInSpec = queryTokens.length > 0;
   }
 
@@ -371,7 +397,12 @@ class RouteParser {
         } else if (paramDef.optional) {
           params[paramDef.name] = undefined;
         } else {
-          // Required query param not found
+          return false;
+        }
+      }
+
+      for (const fixedDef of this.queryFixedDefs) {
+        if (urlQueryParams.get(fixedDef.key) !== fixedDef.value && !fixedDef.optional) {
           return false;
         }
       }
