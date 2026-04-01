@@ -17,20 +17,6 @@ export interface RouteParams {
   [key: string]: string | number | undefined;
 }
 
-// Query parameter definition extracted from route spec
-interface QueryParamDef {
-  name: string;       // Parameter name (e.g., 'page')
-  key: string;        // Query key (e.g., 'page' from 'page=:page')
-  optional: boolean;  // Whether this param is inside optional segment
-}
-
-// Fixed query key-value pair extracted from route spec (e.g., 'type=bar')
-interface QueryFixedDef {
-  key: string;
-  value: string;
-  optional: boolean;
-}
-
 /**
  * Parse a route specification into tokens
  */
@@ -111,54 +97,6 @@ function hasQueryTokens(tokens: Token[]): boolean {
 }
 
 /**
- * Extract query parameter and fixed value definitions from tokens
- */
-function extractQueryDefs(tokens: Token[], optional: boolean = false): { params: QueryParamDef[]; fixed: QueryFixedDef[] } {
-  const params: QueryParamDef[] = [];
-  const fixed: QueryFixedDef[] = [];
-
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
-
-    if (token.type === 'param') {
-      // Look back for the key name (e.g., 'page=' before ':page')
-      let key = token.value; // Default to param name
-      if (i > 0) {
-        const prevToken = tokens[i - 1];
-        if (prevToken.type === 'static' && prevToken.value.endsWith('=')) {
-          // Extract key from "key="
-          const match = prevToken.value.match(/([^=&?]+)=$/);
-          if (match) {
-            key = match[1];
-          }
-        }
-      }
-      params.push({ name: token.value, key, optional });
-    } else if (token.type === 'static') {
-      // Extract fixed key=value pairs (e.g., 'type=bar')
-      const pairs = token.value.split('&').map(s => s.replace(/^[?&]/, ''));
-      for (const pair of pairs) {
-        const eqIdx = pair.indexOf('=');
-        if (eqIdx > 0) {
-          const key = pair.slice(0, eqIdx);
-          const value = pair.slice(eqIdx + 1);
-          if (value) {
-            fixed.push({ key, value, optional });
-          }
-        }
-      }
-    } else if (token.type === 'optional' && token.children) {
-      // Recursively extract from optional segments
-      const childDefs = extractQueryDefs(token.children, true);
-      params.push(...childDefs.params);
-      fixed.push(...childDefs.fixed);
-    }
-  }
-
-  return { params, fixed };
-}
-
-/**
  * Split tokens into path tokens and query tokens
  */
 function splitPathAndQuery(tokens: Token[]): { pathTokens: Token[]; queryTokens: Token[] } {
@@ -197,18 +135,44 @@ function escapeRegex(str: string): string {
 }
 
 /**
- * Check if tokens contain splat parameters (recursively)
+ * Build a regex pattern from path tokens
  */
-function hasSplats(tokens: Token[]): boolean {
+function buildPathRegex(tokens: Token[]): { pattern: string; paramNames: string[] } {
+  let pattern = '';
+  const paramNames: string[] = [];
+
   for (const token of tokens) {
-    if (token.type === 'splat') return true;
-    if (token.type === 'optional' && token.children && hasSplats(token.children)) return true;
+    switch (token.type) {
+      case 'static':
+        pattern += escapeRegex(token.value);
+        break;
+      case 'param':
+        pattern += '([^/]+)';
+        paramNames.push(token.value);
+        break;
+      case 'splat':
+        pattern += '(.+?)';
+        paramNames.push(token.value);
+        break;
+      case 'optional':
+        if (token.children) {
+          const { pattern: childPattern, paramNames: childNames } = buildPathRegex(token.children);
+          pattern += `(?:${childPattern})?`;
+          paramNames.push(...childNames);
+        }
+        break;
+      case 'querySeparator':
+        break;
+    }
   }
-  return false;
+
+  return { pattern, paramNames };
 }
 
 /**
- * Build a regex pattern from query tokens
+ * Build a regex pattern from query tokens.
+ * Handles both key-value patterns (a=:a&b=:b) and structural patterns (auth(*splat)).
+ * Strips leading ? and & query separators from optional children.
  */
 function buildQueryRegex(tokens: Token[]): { pattern: string; paramNames: string[] } {
   let pattern = '';
@@ -229,7 +193,12 @@ function buildQueryRegex(tokens: Token[]): { pattern: string; paramNames: string
         break;
       case 'optional':
         if (token.children) {
-          const { pattern: childPattern, paramNames: childNames } = buildQueryRegex(token.children);
+          // Strip leading query separators (? and &) from optional children
+          let children = token.children;
+          while (children.length > 0 && children[0].type === 'querySeparator') {
+            children = children.slice(1);
+          }
+          const { pattern: childPattern, paramNames: childNames } = buildQueryRegex(children);
           pattern += `(?:${childPattern})?`;
           paramNames.push(...childNames);
         }
@@ -246,42 +215,57 @@ function buildQueryRegex(tokens: Token[]): { pattern: string; paramNames: string
 }
 
 /**
- * Build a regex pattern from path tokens only (no query handling)
+ * Extract query definitions as { key, paramName?, fixedValue?, optional } for map-based matching.
  */
-function buildPathRegex(tokens: Token[]): { pattern: string; paramNames: string[] } {
-  let pattern = '';
-  const paramNames: string[] = [];
+interface QueryDef {
+  key: string;
+  paramName?: string;
+  fixedValue?: string;
+  optional: boolean;
+}
 
-  for (const token of tokens) {
-    switch (token.type) {
-      case 'static':
-        pattern += escapeRegex(token.value);
-        break;
-      case 'param':
-        // Named parameter matches one path segment (no slashes)
-        pattern += '([^/]+)';
-        paramNames.push(token.value);
-        break;
-      case 'splat':
-        // Splat matches any characters including slashes (non-greedy within constraints)
-        pattern += '(.+?)';
-        paramNames.push(token.value);
-        break;
-      case 'optional':
-        // Optional segment - recursively build and wrap in optional group
-        if (token.children) {
-          const { pattern: childPattern, paramNames: childNames } = buildPathRegex(token.children);
-          pattern += `(?:${childPattern})?`;
-          paramNames.push(...childNames);
+function extractQueryDefs(tokens: Token[], optional: boolean = false): QueryDef[] {
+  const defs: QueryDef[] = [];
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+
+    if (token.type === 'param') {
+      let key = token.value;
+      if (i > 0) {
+        const prevToken = tokens[i - 1];
+        if (prevToken.type === 'static' && prevToken.value.endsWith('=')) {
+          const match = prevToken.value.match(/([^=&?]+)=$/);
+          if (match) key = match[1];
         }
-        break;
-      case 'querySeparator':
-        // Should not appear in path tokens
-        break;
+      }
+      defs.push({ key, paramName: token.value, optional });
+    } else if (token.type === 'static') {
+      // Extract fixed key=value pairs (e.g., 'type=bar')
+      for (const part of token.value.split('&')) {
+        const clean = part.replace(/^[?&]/, '');
+        const eqIdx = clean.indexOf('=');
+        if (eqIdx > 0 && clean.length > eqIdx + 1) {
+          defs.push({ key: clean.slice(0, eqIdx), fixedValue: clean.slice(eqIdx + 1), optional });
+        }
+      }
+    } else if (token.type === 'optional' && token.children) {
+      defs.push(...extractQueryDefs(token.children, true));
     }
   }
 
-  return { pattern, paramNames };
+  return defs;
+}
+
+/**
+ * Check if tokens contain splat parameters (recursively)
+ */
+function hasSplats(tokens: Token[]): boolean {
+  for (const token of tokens) {
+    if (token.type === 'splat') return true;
+    if (token.type === 'optional' && token.children && hasSplats(token.children)) return true;
+  }
+  return false;
 }
 
 /**
@@ -291,7 +275,6 @@ function parseQueryString(queryString: string): Map<string, string> {
   const params = new Map<string, string>();
   if (!queryString) return params;
 
-  // Remove leading ? if present
   const qs = queryString.startsWith('?') ? queryString.slice(1) : queryString;
   if (!qs) return params;
 
@@ -360,24 +343,6 @@ function reverseTokens(tokens: Token[], params: RouteParams, isFirstQueryParam: 
 }
 
 /**
- * Check if tokens can be fulfilled with the given params
- */
-function canFulfill(tokens: Token[], params: RouteParams): boolean {
-  for (const token of tokens) {
-    if (token.type === 'param' || token.type === 'splat') {
-      const value = params[token.value];
-      if (value === undefined || value === null || value === '') {
-        return false;
-      }
-    } else if (token.type === 'optional' && token.children) {
-      // Optional segments don't need to be fulfilled
-      continue;
-    }
-  }
-  return true;
-}
-
-/**
  * RouteParser class
  */
 class RouteParser {
@@ -385,11 +350,10 @@ class RouteParser {
   private tokens: Token[];
   private pathRegex: RegExp;
   private pathParamNames: string[];
-  private queryParamDefs: QueryParamDef[];
-  private queryFixedDefs: QueryFixedDef[];
+  // Query matching: use regex for structural patterns (splats), map-based for key-value patterns
   private queryRegex: RegExp | null;
-  private queryParamNames: string[];
-  private hasQueryInSpec: boolean;
+  private queryRegexParamNames: string[];
+  private queryDefs: QueryDef[];
 
   constructor(spec: string) {
     if (!spec) {
@@ -407,21 +371,19 @@ class RouteParser {
     this.pathRegex = new RegExp(`^${pattern}(?:\\?.*)?$`);
     this.pathParamNames = paramNames;
 
-    // Extract query parameter and fixed value definitions
-    const queryDefs = extractQueryDefs(queryTokens);
-    this.queryParamDefs = queryDefs.params;
-    this.queryFixedDefs = queryDefs.fixed;
-    this.hasQueryInSpec = queryTokens.length > 0;
-
-    // Build regex for structural query matching (when splats are used)
-    if (this.hasQueryInSpec && hasSplats(queryTokens)) {
+    // Query matching setup
+    if (queryTokens.length > 0 && hasSplats(queryTokens)) {
+      // Structural query: use regex
       const qTokens = queryTokens[0]?.type === 'querySeparator' ? queryTokens.slice(1) : queryTokens;
       const { pattern: qPattern, paramNames: qParamNames } = buildQueryRegex(qTokens);
       this.queryRegex = new RegExp(`^${qPattern}$`);
-      this.queryParamNames = qParamNames;
+      this.queryRegexParamNames = qParamNames;
+      this.queryDefs = [];
     } else {
+      // Key-value query: use map-based matching (order-independent)
       this.queryRegex = null;
-      this.queryParamNames = [];
+      this.queryRegexParamNames = [];
+      this.queryDefs = extractQueryDefs(queryTokens);
     }
   }
 
@@ -435,7 +397,6 @@ class RouteParser {
     const pathname = queryIndex >= 0 ? path.slice(0, queryIndex) : path;
     const queryString = queryIndex >= 0 ? path.slice(queryIndex + 1) : '';
 
-    // Match only the pathname part (not query string) to avoid capturing ? in params
     const match = this.pathRegex.exec(pathname);
     if (!match) {
       return false;
@@ -448,34 +409,28 @@ class RouteParser {
       params[this.pathParamNames[i]] = match[i + 1];
     }
 
-    // If route has query params in spec, match them from URL's query string
-    if (this.hasQueryInSpec) {
-      if (this.queryRegex) {
-        // Structural query matching (e.g., /?auth(*splat))
-        const qMatch = this.queryRegex.exec(queryString);
-        if (!qMatch) {
-          return false;
-        }
-        for (let i = 0; i < this.queryParamNames.length; i++) {
-          params[this.queryParamNames[i]] = qMatch[i + 1];
-        }
-      } else {
-        // Key-value query matching (order-independent)
-        const urlQueryParams = parseQueryString(queryString);
+    // Structural query matching (splats)
+    if (this.queryRegex) {
+      const qMatch = this.queryRegex.exec(queryString);
+      if (!qMatch) return false;
+      for (let i = 0; i < this.queryRegexParamNames.length; i++) {
+        params[this.queryRegexParamNames[i]] = qMatch[i + 1];
+      }
+    }
 
-        for (const paramDef of this.queryParamDefs) {
-          const value = urlQueryParams.get(paramDef.key);
+    // Key-value query matching (order-independent)
+    if (this.queryDefs.length > 0) {
+      const urlQueryParams = parseQueryString(queryString);
+      for (const def of this.queryDefs) {
+        if (def.fixedValue !== undefined) {
+          if (urlQueryParams.get(def.key) !== def.fixedValue && !def.optional) return false;
+        } else {
+          const value = urlQueryParams.get(def.key);
           if (value !== undefined) {
-            params[paramDef.name] = value;
-          } else if (paramDef.optional) {
-            params[paramDef.name] = undefined;
+            params[def.paramName!] = value;
+          } else if (def.optional) {
+            params[def.paramName!] = undefined;
           } else {
-            return false;
-          }
-        }
-
-        for (const fixedDef of this.queryFixedDefs) {
-          if (urlQueryParams.get(fixedDef.key) !== fixedDef.value && !fixedDef.optional) {
             return false;
           }
         }
