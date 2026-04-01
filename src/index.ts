@@ -197,6 +197,55 @@ function escapeRegex(str: string): string {
 }
 
 /**
+ * Check if tokens contain splat parameters (recursively)
+ */
+function hasSplats(tokens: Token[]): boolean {
+  for (const token of tokens) {
+    if (token.type === 'splat') return true;
+    if (token.type === 'optional' && token.children && hasSplats(token.children)) return true;
+  }
+  return false;
+}
+
+/**
+ * Build a regex pattern from query tokens
+ */
+function buildQueryRegex(tokens: Token[]): { pattern: string; paramNames: string[] } {
+  let pattern = '';
+  const paramNames: string[] = [];
+
+  for (const token of tokens) {
+    switch (token.type) {
+      case 'static':
+        pattern += escapeRegex(token.value);
+        break;
+      case 'param':
+        pattern += '([^&]+)';
+        paramNames.push(token.value);
+        break;
+      case 'splat':
+        pattern += '(.+?)';
+        paramNames.push(token.value);
+        break;
+      case 'optional':
+        if (token.children) {
+          const { pattern: childPattern, paramNames: childNames } = buildQueryRegex(token.children);
+          pattern += `(?:${childPattern})?`;
+          paramNames.push(...childNames);
+        }
+        break;
+      case 'querySeparator':
+        if (token.value === '&') {
+          pattern += '&';
+        }
+        break;
+    }
+  }
+
+  return { pattern, paramNames };
+}
+
+/**
  * Build a regex pattern from path tokens only (no query handling)
  */
 function buildPathRegex(tokens: Token[]): { pattern: string; paramNames: string[] } {
@@ -338,6 +387,8 @@ class RouteParser {
   private pathParamNames: string[];
   private queryParamDefs: QueryParamDef[];
   private queryFixedDefs: QueryFixedDef[];
+  private queryRegex: RegExp | null;
+  private queryParamNames: string[];
   private hasQueryInSpec: boolean;
 
   constructor(spec: string) {
@@ -361,6 +412,17 @@ class RouteParser {
     this.queryParamDefs = queryDefs.params;
     this.queryFixedDefs = queryDefs.fixed;
     this.hasQueryInSpec = queryTokens.length > 0;
+
+    // Build regex for structural query matching (when splats are used)
+    if (this.hasQueryInSpec && hasSplats(queryTokens)) {
+      const qTokens = queryTokens[0]?.type === 'querySeparator' ? queryTokens.slice(1) : queryTokens;
+      const { pattern: qPattern, paramNames: qParamNames } = buildQueryRegex(qTokens);
+      this.queryRegex = new RegExp(`^${qPattern}$`);
+      this.queryParamNames = qParamNames;
+    } else {
+      this.queryRegex = null;
+      this.queryParamNames = [];
+    }
   }
 
   /**
@@ -388,22 +450,34 @@ class RouteParser {
 
     // If route has query params in spec, match them from URL's query string
     if (this.hasQueryInSpec) {
-      const urlQueryParams = parseQueryString(queryString);
-
-      for (const paramDef of this.queryParamDefs) {
-        const value = urlQueryParams.get(paramDef.key);
-        if (value !== undefined) {
-          params[paramDef.name] = value;
-        } else if (paramDef.optional) {
-          params[paramDef.name] = undefined;
-        } else {
+      if (this.queryRegex) {
+        // Structural query matching (e.g., /?auth(*splat))
+        const qMatch = this.queryRegex.exec(queryString);
+        if (!qMatch) {
           return false;
         }
-      }
+        for (let i = 0; i < this.queryParamNames.length; i++) {
+          params[this.queryParamNames[i]] = qMatch[i + 1];
+        }
+      } else {
+        // Key-value query matching (order-independent)
+        const urlQueryParams = parseQueryString(queryString);
 
-      for (const fixedDef of this.queryFixedDefs) {
-        if (urlQueryParams.get(fixedDef.key) !== fixedDef.value && !fixedDef.optional) {
-          return false;
+        for (const paramDef of this.queryParamDefs) {
+          const value = urlQueryParams.get(paramDef.key);
+          if (value !== undefined) {
+            params[paramDef.name] = value;
+          } else if (paramDef.optional) {
+            params[paramDef.name] = undefined;
+          } else {
+            return false;
+          }
+        }
+
+        for (const fixedDef of this.queryFixedDefs) {
+          if (urlQueryParams.get(fixedDef.key) !== fixedDef.value && !fixedDef.optional) {
+            return false;
+          }
         }
       }
     }

@@ -201,6 +201,23 @@ describe('Route', () => {
     });
   });
 
+  describe('structural query parameters', () => {
+    it('should not match /?auth(*splat) with / (no query)', () => {
+      const route = Route('/?auth(*splat)');
+      assert.strictEqual(route.match('/'), false);
+    });
+
+    it('should match /?auth(*splat) with /?auth/login/callback', () => {
+      const route = Route('/?auth(*splat)');
+      assert.deepStrictEqual(route.match('/?auth/login/callback'), { splat: '/login/callback' });
+    });
+
+    it('should match /?auth(*splat) with /?auth', () => {
+      const route = Route('/?auth(*splat)');
+      assert.deepStrictEqual(route.match('/?auth'), { splat: undefined });
+    });
+  });
+
   describe('optional query parameters', () => {
     it('should match route with optional query part - without query', () => {
       const route = Route('/search(?q=:query)');
